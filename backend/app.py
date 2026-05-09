@@ -50,6 +50,20 @@ async def sanitize_image(req: SanitizeRequest):
     
     result = analyzer.sanitize_metadata(input_path, output_path)
     
+    # Store EXIF vault data for recovery
+    import hashlib
+    from PIL import Image
+    os.makedirs(".vault", exist_ok=True)
+    orig_img = Image.open(input_path)
+    exif_bytes = orig_img.info.get("exif")
+    if exif_bytes:
+        hasher = hashlib.sha256()
+        with open(output_path, 'rb') as f:
+            hasher.update(f.read())
+        h = hasher.hexdigest()
+        with open(os.path.join(".vault", f"{h}.exif"), "wb") as f:
+            f.write(exif_bytes)
+    
     return {
         "result": result, 
         "sanitized_filename": output_filename,
@@ -67,3 +81,45 @@ async def export_metadata(req: SanitizeRequest):
         raise HTTPException(status_code=400, detail="No metadata could be retrieved")
         
     return meta
+
+@app.post("/unsanitize")
+async def unsanitize_image(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+        
+    recovery_dir = os.path.join("uploads", "recovery")
+    os.makedirs(recovery_dir, exist_ok=True)
+    file_path = os.path.join(recovery_dir, file.filename)
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    import hashlib
+    from PIL import Image
+    
+    hasher = hashlib.sha256()
+    with open(file_path, 'rb') as f:
+        hasher.update(f.read())
+    h = hasher.hexdigest()
+    
+    vault_path = os.path.join(".vault", f"{h}.exif")
+    if not os.path.exists(vault_path):
+        raise HTTPException(
+            status_code=404, 
+            detail="Digital signature unrecognized. This image was likely NOT sanitized by this application, or it has been further compressed/altered elsewhere."
+        )
+        
+    with open(vault_path, "rb") as f:
+        recovered_exif = f.read()
+        
+    out_filename = "recovered_" + file.filename
+    out_path = os.path.join("uploads", out_filename)
+    
+    img = Image.open(file_path)
+    img.save(out_path, exif=recovered_exif)
+    
+    return {
+        "status": "success", 
+        "recovered_url": f"http://localhost:8000/uploads/{out_filename}", 
+        "recovered_filename": out_filename
+    }
